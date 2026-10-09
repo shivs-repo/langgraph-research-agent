@@ -18,6 +18,7 @@ env/
 
 # LangGraph
 .langgraph_cache/
+.langgraph_api/
 
 # IDE
 .vscode/
