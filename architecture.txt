@@ -1,0 +1,138 @@
+Build a research paper agentic system using LangGraph with a Streamlit frontend. Here are the exact requirements:
+
+---
+
+## TECH STACK
+- LangGraph (StateGraph) for the agentic graph
+- OpenRouter API as the LLM provider (base_url: https://openrouter.ai/api/v1), model: openai/gpt-4o-mini
+- Tavily Python SDK for web search (tavily-python)
+- Streamlit for the frontend UI
+- python-dotenv for environment variables
+- openai Python SDK (used to call OpenRouter)
+
+---
+
+## PROJECT STRUCTURE
+project/
+├── .env
+├── app.py                  ← Streamlit frontend
+├── requirements.txt
+└── graph/
+    ├── __init__.py         ← empty
+    ├── state.py            ← ResearchState TypedDict
+    ├── agents.py           ← all agent node functions
+    └── graph.py            ← LangGraph graph definition
+
+---
+
+## STATE SCHEMA (graph/state.py)
+Use TypedDict named ResearchState with these fields:
+- topic: str
+- max_iterations: int
+- iteration: int (starts at 0)
+- search_queries: List[str]
+- search_results: List[dict]
+- reasoning_output: str
+- is_sufficient: bool
+- node_outputs: List[dict]  ← stores every node's output for UI rendering
+- final_report: str
+
+---
+
+## GRAPH NODES (graph/agents.py)
+
+### Node 1: reasoning_agent
+- Increments iteration by 1
+- Calls OpenRouter (openai/gpt-4o-mini) with response_format={"type": "json_object"}
+- System prompt instructs it to:
+  1. Evaluate if existing search_results sufficiently answer the research topic
+  2. Generate refined search queries if more data is needed
+  3. Respond ONLY in JSON: { "is_sufficient": bool, "reasoning": str, "search_queries": [str] }
+- Pass last 10 search results (truncated to 300 chars each) to avoid token overflow
+- Appends to node_outputs: { "iteration": int, "node": "Reasoning Agent", "is_sufficient": bool, "reasoning": str, "search_queries": [str] }
+- Updates state: iteration, search_queries, reasoning_output, is_sufficient, node_outputs
+
+### Node 2: web_search_agent
+- Takes search_queries from state, limits to first 3 queries
+- For each query, calls tavily.search() with:
+  - query: f"{query} research paper"
+  - search_depth: "advanced"
+  - max_results: 3
+  - include_domains: ["arxiv.org", "scholar.google.com", "pubmed.ncbi.nlm.nih.gov", "semanticscholar.org", "researchgate.net"]
+- Accumulates all results into search_results (appends, does not replace)
+- Handles exceptions per query, stores error in output
+- Appends to node_outputs: { "iteration": int, "node": "Web Search Agent", "searches": [{ "query": str, "results": [...] or "error": str }] }
+- Updates state: search_results, node_outputs
+
+### Node 3: generate_report
+- Calls OpenRouter to synthesize all search_results into a comprehensive markdown research summary
+- System prompt: research paper analyst, produce structured summary with key findings, methodologies, references
+- Appends to node_outputs: { "iteration": int, "node": "Report Generator", "report": str }
+- Updates state: final_report, node_outputs
+
+### Conditional Edge function: should_continue(state) -> str
+- Returns "generate_report" if state["is_sufficient"] is True
+- Returns "generate_report" if state["iteration"] >= state["max_iterations"]
+- Otherwise returns "web_search"
+
+---
+
+## GRAPH DEFINITION (graph/graph.py)
+- StateGraph(ResearchState)
+- Nodes: "reasoning", "web_search", "generate_report"
+- Entry point: "reasoning"
+- Conditional edges from "reasoning" using should_continue mapping:
+  - "web_search" → "web_search" node
+  - "generate_report" → "generate_report" node
+- Edge: "web_search" → "reasoning"
+- Edge: "generate_report" → END
+- Return graph.compile()
+
+---
+
+## STREAMLIT FRONTEND (app.py)
+- load_dotenv() at top
+- Page config: title="Research Paper Agent", layout="wide"
+- Sidebar: slider for max_iterations (1-5, default 3) with info message
+- Main area: text_input for topic
+- On button click, initialize state with iteration=0, is_sufficient=False, empty lists
+- Stream the graph using graph.stream(initial_state, stream_mode="values")
+- After each streamed step, re-render all node_outputs grouped by iteration number
+- Each iteration shown as st.expander (latest one expanded by default)
+- Inside each expander, use st.columns(len(outputs)) to show each node side by side
+- Reasoning Agent column shows: status (sufficient/not), evaluation text, search queries as inline code
+- Web Search Agent column shows: each query, results as markdown links with 200-char content captions
+- Report Generator column shows: full markdown report
+- After streaming ends, show final report section with:
+  - Exit reason (sufficient vs max iterations reached)
+  - Total iterations count
+  - Full markdown report
+  - Download button as .md file
+
+---
+
+## .env FILE
+OPENROUTER_API_KEY=your_openrouter_key
+TAVILY_API_KEY=your_tavily_key
+
+---
+
+## requirements.txt
+langgraph>=0.2.0
+langchain>=0.3.0
+openai>=1.0.0
+tavily-python>=0.3.0
+streamlit>=1.35.0
+python-dotenv>=1.0.0
+
+---
+
+## IMPORTANT IMPLEMENTATION NOTES
+1. In agents.py, initialize OpenAI client with base_url="https://openrouter.ai/api/v1"
+2. Each node must return {**state, ...updated_fields} to preserve full state
+3. node_outputs must always use state.get("node_outputs", []) + [new_output] pattern
+4. In Streamlit, use a single st.empty() placeholder and re-render inside it on every stream step to simulate live updates
+5. The graph loops: reasoning → web_search → reasoning → ... until exit condition
+6. Do NOT use early exit based on sufficiency alone — also respect max_iterations as a hard cap
+7. Early exit IS allowed when is_sufficient=True (before reaching max_iterations)
+8. Keep code minimal — no unnecessary abstractions or wrapper classes
